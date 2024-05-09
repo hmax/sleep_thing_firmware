@@ -1,26 +1,25 @@
-use core::convert::TryInto;
 use std::io;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::TcpStream;
 
 use core::ffi::CStr;
 use core::pin::pin;
-use core::sync::atomic::{AtomicU32, Ordering};
 use core::time::Duration;
+use std::cell::RefCell;
 use esp_idf_svc::hal::delay::Delay;
-use esp_idf_svc::hal::gpio::{Gpio8, Gpio9};
-use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver, I2C0};
+use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::prelude::Peripherals;
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use esp_idf_svc::{eventloop::EspSystemEventLoop, nvs::EspDefaultNvsPartition};
-use log::{debug, error, info, LevelFilter, trace};
+use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use log::{debug, error, info, trace};
 use scd4x::Scd4x;
 use scd4x::types::SensorData;
-use std::collections::VecDeque;
+use embedded_hal_bus::i2c;
+use embedded_hal_bus::i2c::RefCellDevice;
+use esp_idf_svc::eventloop::{BackgroundLoopConfiguration, EspBackgroundEventLoop, EspEvent, EspEventDeserializer, EspEventPostData, EspEventSerializer, EspEventSource, EspSystemEventLoop};
 
-use esp_idf_svc::eventloop::*;
 use esp_idf_svc::hal::delay;
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::timer::EspTaskTimerService;
@@ -31,8 +30,8 @@ const PASSWORD: &str = "***REMOVED***";
 const HOST: &str = "192.168.24.1";
 const PORT: &str = "2003";
 
-const MEASURE_TIMEOUT_SEC: u64 = 30;
-const SEND_TIMEOUT_SEC: u64 = 30;
+const MEASURE_TIMEOUT_SEC: u64 = 600;
+const SEND_TIMEOUT_SEC: u64 = 600;
 
 
 type CO2Measurement = SensorData;
@@ -41,14 +40,9 @@ fn preamble() {
     EspLogger::initialize_default();
 }
 
-fn get_sensor<'a>(
-    i2c: &'a mut I2C0,
-    scl: &'a mut Gpio8,
-    sda: &'a mut Gpio9,
-) -> Scd4x<I2cDriver<'a>, Delay> {
-
-    let config = I2cConfig::new().baudrate(100.kHz().into());
-    let i2c = I2cDriver::new(i2c, sda, scl, &config).unwrap();
+fn get_sensor<'a, 'b>(
+    i2c: RefCellDevice<'b, I2cDriver<'a>>
+) -> Scd4x<RefCellDevice<'b, I2cDriver<'a>>, Delay> {
 
     println!("Setting up a sensor");
     let mut sensor = Scd4x::new(i2c, Delay::new_default());
@@ -70,7 +64,12 @@ fn main() -> anyhow::Result<()> {
     preamble();
 
     let mut peripherals = Peripherals::take()?;
-    let mut co2_sensor = get_sensor(&mut peripherals.i2c0, &mut peripherals.pins.gpio8, &mut peripherals.pins.gpio9);
+
+    let config = I2cConfig::new().baudrate(100.kHz().into());
+    let i2c = I2cDriver::new(peripherals.i2c0, peripherals.pins.gpio9, peripherals.pins.gpio8, &config).unwrap();
+    let i2c_ref_cell = RefCell::new(i2c);
+
+    let mut co2_sensor = get_sensor(RefCellDevice::new(&i2c_ref_cell));
 
     info!("Starting the first measurement... (5 sec)");
 
@@ -87,7 +86,7 @@ fn main() -> anyhow::Result<()> {
     let user_loop = EspBackgroundEventLoop::new(&BackgroundLoopConfiguration::default())?;
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
-    let mut wifi = BlockingWifi::wrap(
+    let wifi = BlockingWifi::wrap(
         EspWifi::new(&mut peripherals.modem, sys_loop.clone(), Some(nvs))?,
         sys_loop.clone(),
     )?;
@@ -141,7 +140,7 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi>) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run(mut wifi: BlockingWifi<EspWifi>, mut co2_sensor: Scd4x<I2cDriver, Delay>, mut event_loop: EspBackgroundEventLoop) -> Result<(), EspError> {
+fn run(mut wifi: BlockingWifi<EspWifi>, mut co2_sensor: Scd4x<RefCellDevice<I2cDriver>, Delay>, mut event_loop: EspBackgroundEventLoop) -> Result<(), EspError> {
     println!("Making measurements vector");
     let mut measurements: Vec<CO2Measurement> = Vec::with_capacity(100);
 
