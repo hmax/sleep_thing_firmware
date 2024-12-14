@@ -23,6 +23,8 @@ use esp_idf_svc::eventloop::{BackgroundLoopConfiguration, EspBackgroundEventLoop
 use esp_idf_svc::hal::delay;
 use esp_idf_svc::sys::EspError;
 use esp_idf_svc::timer::EspTaskTimerService;
+use esp_idf_svc::wifi::PmfConfiguration::NotCapable;
+use esp_idf_svc::wifi::ScanMethod::FastScan;
 
 const SSID: &str = "***REMOVED***";
 const PASSWORD: &str = "***REMOVED***";
@@ -124,6 +126,8 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi>) -> anyhow::Result<()> {
         auth_method: AuthMethod::WPA2Personal,
         password: PASSWORD.try_into().unwrap(),
         channel: None,
+        scan_method: FastScan,
+        pmf_cfg: NotCapable,
     });
 
     trace!("wifi.set_configuration");
