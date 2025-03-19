@@ -28,11 +28,10 @@ scd4x = ["scd4x/scd41"]
 
 [dependencies]
 log = { version = "0.4", default-features = false }
-esp-idf-svc = { version = "0.49.1", default-features = false }
-scd4x = { version = "0.3.0" }
+esp-idf-svc = { version = "0.51.0", default-features = false }
+scd4x = { version = "0.4.0", default-features = false }
 anyhow = "1.0.79"
-config = "0.14.0"
-embedded-hal-bus = "0.2.0"
+embedded-hal-bus = "0.3.0"
 
 [build-dependencies]
-embuild = "0.32.0"
+embuild = "0.33.0"
