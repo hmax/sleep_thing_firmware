@@ -5,24 +5,28 @@ use std::net::TcpStream;
 use core::time::Duration;
 use embedded_hal_bus::i2c::RefCellDevice;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
+use esp_idf_svc::hal;
 use esp_idf_svc::hal::delay::Delay;
-use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
+use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver, I2cError};
+use esp_idf_svc::hal::i2s;
+use esp_idf_svc::hal::i2s::config;
 use esp_idf_svc::hal::prelude::Peripherals;
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
 use esp_idf_svc::nvs::EspDefaultNvsPartition;
+use esp_idf_svc::sys::EspError;
+use esp_idf_svc::wifi::PmfConfiguration::NotCapable;
+use esp_idf_svc::wifi::ScanMethod::FastScan;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 use log::{debug, error, info, trace};
 use scd4x::types::SensorData;
 use scd4x::Scd4x;
 use std::cell::RefCell;
+use std::env;
+use tsl2591_eh_driver;
 
-use esp_idf_svc::sys::EspError;
-use esp_idf_svc::wifi::PmfConfiguration::NotCapable;
-use esp_idf_svc::wifi::ScanMethod::FastScan;
-
-const SSID: &str = "***REMOVED***";
-const PASSWORD: &str = "***REMOVED***";
+const SSID: &str = env!("SSID");
+const PASSWORD: &str = env!("WIFI_PASSWORD");
 
 const HOST: &str = "192.168.24.1";
 const PORT: &str = "2003";
@@ -53,7 +57,6 @@ fn get_co2_sensor<'a, 'b>(
 }
 
 fn main() -> anyhow::Result<()> {
-    println!("Shieeeet");
     preamble();
 
     let mut peripherals = Peripherals::take()?;
@@ -62,31 +65,42 @@ fn main() -> anyhow::Result<()> {
     let i2c = I2cDriver::new(
         peripherals.i2c0,
         peripherals.pins.gpio9,
-        peripherals.pins.gpio8,
+        peripherals.pins.gpio7,
         &config,
     )?;
     let i2c_ref_cell = RefCell::new(i2c);
-
     let co2_sensor = get_co2_sensor(RefCellDevice::new(&i2c_ref_cell));
-
+    let lux_sensor = get_lux_sensor(RefCellDevice::new(&i2c_ref_cell));
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
     let wifi = BlockingWifi::wrap(
         EspWifi::new(&mut peripherals.modem, sys_loop.clone(), Some(nvs))?,
         sys_loop.clone(),
     )?;
-
     trace!("Calling run");
-
-    run(wifi, co2_sensor)?;
+    run(wifi, co2_sensor, lux_sensor)?;
     Ok(())
 }
 
-fn send_data(data: &SensorData) -> Result<(), io::Error> {
+fn get_lux_sensor<'a, 'b>(
+    i2c: RefCellDevice<'b, I2cDriver<'a>>,
+) -> tsl2591_eh_driver::Driver<RefCellDevice<'b, I2cDriver<'a>>> {
+    let mut lux_sensor = tsl2591_eh_driver::Driver::new(i2c).unwrap();
+    lux_sensor.enable().unwrap();
+    std::thread::sleep(Duration::from_millis(200)); // according to spec, since wake_up doesn't get an ACK
+
+    println!("Lux sensor status: {:?}", lux_sensor.get_status().unwrap());
+    lux_sensor.disable().unwrap();
+    lux_sensor
+}
+
+fn send_data(data: &SensorData, lux: f32) -> Result<(), io::Error> {
     let mut stream = TcpStream::connect(std::format!("{}:{}", HOST, PORT))?;
 
+    stream.write_all(format!("sensors.hbase.cabinet.lux {} -1\n", lux).as_bytes())?;
     stream.write_all(format!("sensors.hbase.cabinet.temp {} -1\n", data.temperature).as_bytes())?;
-    stream.write_all(format!("sensors.hbase.cabinet.humidity {} -1\n", data.humidity).as_bytes())?;
+    stream
+        .write_all(format!("sensors.hbase.cabinet.humidity {} -1\n", data.humidity).as_bytes())?;
     stream.write_all(format!("sensors.hbase.cabinet.co2 {} -1\n", data.co2).as_bytes())?;
 
     Ok(())
@@ -125,18 +139,14 @@ fn disconnect_wifi(wifi: &mut BlockingWifi<EspWifi>) -> anyhow::Result<()> {
 fn run(
     mut wifi: BlockingWifi<EspWifi>,
     mut co2_sensor: Scd4x<RefCellDevice<I2cDriver>, Delay>,
+    mut lux_sensor: tsl2591_eh_driver::Driver<RefCellDevice<I2cDriver>>,
 ) -> Result<(), EspError> {
     debug!("Starting main loop");
     loop {
-        co2_sensor.wake_up();
-        co2_sensor.wake_up();  // For some reason if you just do the one wakeup it doesn't work, need to check it with an LA or scope
-        std::thread::sleep(Duration::from_millis(20));  // according to spec, since wake_up doesn't get an ACK
+        let co2 = measure_co2(&mut co2_sensor);
+        let lux = measure_lux(&mut lux_sensor);
 
-        co2_sensor.measure_single_shot().unwrap(); // Discarding the first reading after waking up, according to the spec
-        co2_sensor.measure_single_shot().unwrap();
-        let measurement = co2_sensor.measurement();
-        co2_sensor.power_down().unwrap();
-        match measurement {
+        match co2 {
             Ok(measurement) => {
                 match connect_wifi(&mut wifi) {
                     Ok(_) => {}
@@ -146,10 +156,10 @@ fn run(
                 };
 
                 info!(
-                    "CO2: {}, Temperature: {} C, Humidity: {} RH",
-                    measurement.co2, measurement.temperature, measurement.humidity
+                    "CO2: {}, Temperature: {} C, Humidity: {} RH, Lux: {} Lx",
+                    measurement.co2, measurement.temperature, measurement.humidity, lux
                 );
-                match send_data(&measurement) {
+                match send_data(&measurement, lux) {
                     Ok(_) => {}
                     Err(err) => {
                         error!("Error while sending data: {:?}", err);
@@ -161,7 +171,6 @@ fn run(
                     Err(error) => {
                         error!("Error while trying to disconnect from wifi: {:?}", error);
                     }
-
                 }
             }
             Err(error) => {
@@ -170,5 +179,88 @@ fn run(
         }
 
         std::thread::sleep(Duration::from_secs(SEND_TIMEOUT_SEC));
+    }
+}
+
+fn measure_co2(
+    co2_sensor: &mut Scd4x<RefCellDevice<I2cDriver>, Delay>,
+) -> Result<SensorData, scd4x::Error<I2cError>> {
+    co2_sensor.wake_up();
+    co2_sensor.wake_up(); // For some reason if you just do the one wakeup it doesn't work, need to check it with an LA or scope
+    std::thread::sleep(Duration::from_millis(20)); // according to spec, since wake_up doesn't get an ACK
+
+    co2_sensor.measure_single_shot()?; // Discarding the first reading after waking up, according to the spec
+    co2_sensor.measure_single_shot()?;
+    let measurement = co2_sensor.measurement();
+    co2_sensor.power_down()?;
+    measurement
+}
+
+fn measure_lux(lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDriver>>) -> f32 {
+    let mut current_gain = tsl2591_eh_driver::Gain::MED;
+    let current_scan = tsl2591_eh_driver::IntegrationTimes::_100MS;
+
+    loop {
+        lux_sensor.set_gain(current_gain).unwrap();
+        lux_sensor.set_timing(current_scan).unwrap();
+
+        lux_sensor.enable().unwrap();
+        loop {
+            let lux_sensor_status = lux_sensor.get_status().unwrap();
+            if lux_sensor_status.avalid() {
+                println!("Lux sensor status: {:?}", lux_sensor_status);
+                break;
+            } else {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        let (ch0, ch1) = lux_sensor.get_channel_data().unwrap();
+        lux_sensor.disable().unwrap();
+
+        match lux_sensor.calculate_lux(ch0, ch1) {
+            Ok(lux) => {
+                if lux.is_nan() {
+                    // Basically we got an underflow
+                    match increment_gain(current_gain) {
+                        Ok(gain) => {
+                            current_gain = gain;
+                        }
+                        // We are already at max gain
+                        Err(_) => return 0.0,
+                    }
+                } else {
+                    return lux;
+                }
+            }
+            // We have an overflow
+            Err(_) => {
+                match decrement_gain(current_gain) {
+                    Ok(gain) => {
+                        current_gain = gain;
+                    }
+                    // If we are at the lowest gain already and are still getting an overflow we can return the brightest sunlight levels
+                    Err(_) => return 120000f32,
+                }
+            }
+        }
+    }
+}
+
+fn increment_gain(gain: tsl2591_eh_driver::Gain) -> Result<tsl2591_eh_driver::Gain, &'static str> {
+    match gain {
+        tsl2591_eh_driver::Gain::LOW => Ok(tsl2591_eh_driver::Gain::MED),
+        tsl2591_eh_driver::Gain::MED => Ok(tsl2591_eh_driver::Gain::HIGH),
+        tsl2591_eh_driver::Gain::HIGH => Ok(tsl2591_eh_driver::Gain::MAX),
+        tsl2591_eh_driver::Gain::MAX => Err("Gain maxed out"),
+    }
+}
+
+fn decrement_gain(gain: tsl2591_eh_driver::Gain) -> Result<tsl2591_eh_driver::Gain, &'static str> {
+    match gain {
+        tsl2591_eh_driver::Gain::LOW => Err("Gain already minimal"),
+        tsl2591_eh_driver::Gain::MED => Ok(tsl2591_eh_driver::Gain::LOW),
+        tsl2591_eh_driver::Gain::HIGH => Ok(tsl2591_eh_driver::Gain::MED),
+        tsl2591_eh_driver::Gain::MAX => Ok(tsl2591_eh_driver::Gain::HIGH),
     }
 }
