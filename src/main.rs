@@ -5,11 +5,8 @@ use std::net::TcpStream;
 use core::time::Duration;
 use embedded_hal_bus::i2c::RefCellDevice;
 use esp_idf_svc::eventloop::EspSystemEventLoop;
-use esp_idf_svc::hal;
 use esp_idf_svc::hal::delay::Delay;
-use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver, I2cError};
-use esp_idf_svc::hal::i2s;
-use esp_idf_svc::hal::i2s::config;
+use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
 use esp_idf_svc::hal::prelude::Peripherals;
 use esp_idf_svc::hal::units::FromValueType;
 use esp_idf_svc::log::EspLogger;
@@ -19,6 +16,7 @@ use esp_idf_svc::wifi::PmfConfiguration::NotCapable;
 use esp_idf_svc::wifi::ScanMethod::FastScan;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
 use log::{debug, error, info, trace};
+use rand::prelude::*;
 use scd4x::types::SensorData;
 use scd4x::Scd4x;
 use std::cell::RefCell;
@@ -31,7 +29,7 @@ const PASSWORD: &str = env!("WIFI_PASSWORD");
 const HOST: &str = "192.168.24.1";
 const PORT: &str = "2003";
 
-const SEND_TIMEOUT_SEC: u64 = 600;
+const SEND_TIMEOUT_SEC: i32 = 300;
 
 fn preamble() {
     esp_idf_svc::sys::link_patches();
@@ -43,9 +41,6 @@ fn get_co2_sensor<'a, 'b>(
 ) -> Scd4x<RefCellDevice<'b, I2cDriver<'a>>, Delay> {
     println!("Setting up a sensor");
     let mut sensor = Scd4x::new(i2c, Delay::new_default());
-    println!("Waking up a sensor");
-
-    //sensor.wake_up();
     println!("Stopping periodic measurement in a sensor");
     sensor.stop_periodic_measurement().unwrap();
     println!("Re-initializing a sensor");
@@ -94,14 +89,23 @@ fn get_lux_sensor<'a, 'b>(
     lux_sensor
 }
 
-fn send_data(data: &SensorData, lux: f32) -> Result<(), io::Error> {
+fn send_data(co2: Option<SensorData>, lux: Option<f32>) -> Result<(), io::Error> {
     let mut stream = TcpStream::connect(std::format!("{}:{}", HOST, PORT))?;
 
-    stream.write_all(format!("sensors.hbase.cabinet.lux {} -1\n", lux).as_bytes())?;
-    stream.write_all(format!("sensors.hbase.cabinet.temp {} -1\n", data.temperature).as_bytes())?;
-    stream
-        .write_all(format!("sensors.hbase.cabinet.humidity {} -1\n", data.humidity).as_bytes())?;
-    stream.write_all(format!("sensors.hbase.cabinet.co2 {} -1\n", data.co2).as_bytes())?;
+    if lux.is_some() {
+        stream.write_all(format!("sensors.hbase.cabinet.lux {} -1\n", lux.unwrap()).as_bytes())?;
+    }
+
+    if co2.is_some() {
+        let data = co2.unwrap();
+        stream.write_all(
+            format!("sensors.hbase.cabinet.temp {} -1\n", data.temperature).as_bytes(),
+        )?;
+        stream.write_all(
+            format!("sensors.hbase.cabinet.humidity {} -1\n", data.humidity).as_bytes(),
+        )?;
+        stream.write_all(format!("sensors.hbase.cabinet.co2 {} -1\n", data.co2).as_bytes())?;
+    }
 
     Ok(())
 }
@@ -146,57 +150,69 @@ fn run(
         let co2 = measure_co2(&mut co2_sensor);
         let lux = measure_lux(&mut lux_sensor);
 
-        match co2 {
-            Ok(measurement) => {
-                match connect_wifi(&mut wifi) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        error!("Error while trying to connect to wifi: {:?}", error);
+        if lux.is_some() || co2.is_some() {
+            match connect_wifi(&mut wifi) {
+                Ok(_) => {
+                    match send_data(co2, lux) {
+                        Ok(_) => {}
+                        Err(err) => {
+                            error!("Error while sending data: {:?}", err);
+                        }
                     }
-                };
-
-                info!(
-                    "CO2: {}, Temperature: {} C, Humidity: {} RH, Lux: {} Lx",
-                    measurement.co2, measurement.temperature, measurement.humidity, lux
-                );
-                match send_data(&measurement, lux) {
-                    Ok(_) => {}
-                    Err(err) => {
-                        error!("Error while sending data: {:?}", err);
+                    match disconnect_wifi(&mut wifi) {
+                        Ok(_) => {}
+                        Err(error) => {
+                            error!("Error while trying to disconnect from wifi: {:?}", error);
+                        }
                     }
                 }
-
-                match disconnect_wifi(&mut wifi) {
-                    Ok(_) => {}
-                    Err(error) => {
-                        error!("Error while trying to disconnect from wifi: {:?}", error);
-                    }
+                Err(error) => {
+                    error!("Error while trying to connect to wifi: {:?}", error);
                 }
-            }
-            Err(error) => {
-                error!("Error while measuring: {:?}", error);
-            }
+            };
         }
 
-        std::thread::sleep(Duration::from_secs(SEND_TIMEOUT_SEC));
+        let spread = (SEND_TIMEOUT_SEC as f32 * 0.1) as i32;
+        let jitter = rand::rng().random_range((-spread)..=spread);
+
+        std::thread::sleep(Duration::from_secs((SEND_TIMEOUT_SEC + jitter) as u64));
     }
 }
 
-fn measure_co2(
-    co2_sensor: &mut Scd4x<RefCellDevice<I2cDriver>, Delay>,
-) -> Result<SensorData, scd4x::Error<I2cError>> {
+fn measure_co2(co2_sensor: &mut Scd4x<RefCellDevice<I2cDriver>, Delay>) -> Option<SensorData> {
     co2_sensor.wake_up();
     co2_sensor.wake_up(); // For some reason if you just do the one wakeup it doesn't work, need to check it with an LA or scope
     std::thread::sleep(Duration::from_millis(20)); // according to spec, since wake_up doesn't get an ACK
 
-    co2_sensor.measure_single_shot()?; // Discarding the first reading after waking up, according to the spec
-    co2_sensor.measure_single_shot()?;
-    let measurement = co2_sensor.measurement();
-    co2_sensor.power_down()?;
+    let _ = co2_sensor.measure_single_shot(); // Discarding the first reading after waking up, according to the spec
+    let result = co2_sensor.measure_single_shot();
+    let measurement: Option<SensorData> = match result {
+        Ok(_) => {
+            match co2_sensor.measurement() {
+                Ok(measurement) => {
+                    info!(
+                        "CO2: {:?}, Humidity: {} RH, Temperature: {} C",
+                        measurement.co2, measurement.humidity, measurement.temperature
+                    );
+                    Some(measurement)
+                }
+                Err(error) => {
+                    error!("Error trying to measure co2: {:?}", error);
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            None
+        }
+    };
+    let _ = co2_sensor.power_down();
     measurement
 }
 
-fn measure_lux(lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDriver>>) -> f32 {
+fn measure_lux(
+    lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDriver>>,
+) -> Option<f32> {
     let mut current_gain = tsl2591_eh_driver::Gain::MED;
     let current_scan = tsl2591_eh_driver::IntegrationTimes::_100MS;
 
@@ -205,12 +221,14 @@ fn measure_lux(lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDrive
         lux_sensor.set_timing(current_scan).unwrap();
 
         lux_sensor.enable().unwrap();
-        loop {
+        let mut loop_count = 0;
+        while loop_count < 10 {
             let lux_sensor_status = lux_sensor.get_status().unwrap();
             if lux_sensor_status.avalid() {
                 println!("Lux sensor status: {:?}", lux_sensor_status);
                 break;
             } else {
+                loop_count = loop_count + 1;
                 std::thread::sleep(Duration::from_millis(100));
             }
         }
@@ -226,11 +244,12 @@ fn measure_lux(lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDrive
                         Ok(gain) => {
                             current_gain = gain;
                         }
-                        // We are already at max gain
-                        Err(_) => return 0.0,
+                        // We are already at max gain, we can consider this to be pitch-black
+                        Err(_) => return Some(0.0),
                     }
                 } else {
-                    return lux;
+                    info!("Lux: {} lx", lux);
+                    return Some(lux);
                 }
             }
             // We have an overflow
@@ -240,7 +259,7 @@ fn measure_lux(lux_sensor: &mut tsl2591_eh_driver::Driver<RefCellDevice<I2cDrive
                         current_gain = gain;
                     }
                     // If we are at the lowest gain already and are still getting an overflow we can return the brightest sunlight levels
-                    Err(_) => return 120000f32,
+                    Err(_) => return None,
                 }
             }
         }
