@@ -17,7 +17,7 @@ use esp_idf_svc::sys::EspError;
 use esp_idf_svc::wifi::PmfConfiguration::NotCapable;
 use esp_idf_svc::wifi::ScanMethod::FastScan;
 use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
-use log::{debug, error, info, trace};
+use log::{debug, error, info, trace, LevelFilter};
 use rand::prelude::*;
 use ringbuffer::{AllocRingBuffer, RingBuffer};
 use scd4x::types::SensorData;
@@ -38,6 +38,7 @@ const SEND_TIMEOUT_SEC: i32 = 300;
 fn preamble() {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
+    EspLogger::set_target_level("wifi", LevelFilter::Warn);
 }
 
 fn get_co2_sensor<'a, 'b>(
@@ -46,7 +47,7 @@ fn get_co2_sensor<'a, 'b>(
     println!("Setting up a sensor");
     let mut sensor = Scd4x::new(i2c, Delay::new_default());
     println!("Stopping periodic measurement in a sensor");
-    //_ = sensor.stop_periodic_measurement();
+    _ = sensor.stop_periodic_measurement();
     println!("Re-initializing a sensor");
     sensor.reinit().unwrap();
 
@@ -96,7 +97,7 @@ fn get_lux_sensor<'a, 'b>(
 ) -> tsl2591_eh_driver::Driver<RefCellDevice<'b, I2cDriver<'a>>> {
     let mut lux_sensor = tsl2591_eh_driver::Driver::new(i2c).unwrap();
     lux_sensor.enable().unwrap();
-    std::thread::sleep(Duration::from_millis(200)); // according to spec, since wake_up doesn't get an ACK
+    std::thread::sleep(Duration::from_millis(1000)); 
 
     println!("Lux sensor status: {:?}", lux_sensor.get_status().unwrap());
     lux_sensor.disable().unwrap();
@@ -179,6 +180,7 @@ fn run(
             .as_secs();
 
         measurements.push((now, co2, lux));
+        println!("Measurements available for sending: {}", measurements.len());
         match connect_wifi(&mut wifi) {
             Ok(_) => {
                 while let Some((now, co2, lux)) = measurements.dequeue() {
@@ -192,7 +194,7 @@ fn run(
                     }
                 }
 
-                std::thread::sleep(Duration::from_millis(1000));
+                std::thread::sleep(Duration::from_millis(5000));
 
                 match disconnect_wifi(&mut wifi) {
                     Ok(_) => {}
@@ -216,7 +218,7 @@ fn run(
 fn measure_co2(co2_sensor: &mut Scd4x<RefCellDevice<I2cDriver>, Delay>) -> Option<SensorData> {
     co2_sensor.wake_up();
     co2_sensor.wake_up(); // For some reason if you just do the one wakeup it doesn't work, need to check it with an LA or scope
-    std::thread::sleep(Duration::from_millis(20)); // according to spec, since wake_up doesn't get an ACK
+    std::thread::sleep(Duration::from_millis(200)); // according to spec should not take more than 20msec, since wake_up doesn't get an ACK, so we are waiting 10x
 
     let _ = co2_sensor.measure_single_shot(); // Discarding the first reading after waking up, according to the spec
     let result = co2_sensor.measure_single_shot();
