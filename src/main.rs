@@ -45,14 +45,15 @@ const SEND_TIMEOUT_SEC: i32 = 300;
 const DATA_PREFIX: &str = "sensors.hbase.bedroom.";
 
 
-fn preamble() {
+fn preamble() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     EspLogger::initialize_default();
-    esp_idf_svc::log::set_target_level("wifi", LevelFilter::Error).unwrap();
+    esp_idf_svc::log::set_target_level("wifi", LevelFilter::Error)?;
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
-    preamble();
+    preamble()?;
 
     let mut peripherals = Peripherals::take()?;
     let config = I2cConfig::new().baudrate(100u32.kHz().into());
@@ -119,10 +120,12 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi>) -> anyhow::Result<()> {
     disconnect_wifi(wifi)?;
 
     let wifi_configuration: Configuration = Configuration::Client(ClientConfiguration {
-        ssid: SSID.try_into().unwrap(),
+        ssid: SSID.try_into()
+            .expect("SSID should be valid UTF-8"),
         bssid: None,
         auth_method: AuthMethod::WPA2Personal,
-        password: PASSWORD.try_into().unwrap(),
+        password: PASSWORD.try_into()
+            .expect("Password should be valid UTF-8"),
         channel: None,
         scan_method: FastScan,
         pmf_cfg: NotCapable,
@@ -161,10 +164,10 @@ fn run<'a>(
             new_measurements.extend(measurement);
         }
 
-        if new_measurements.len() > 0 {
+        if !new_measurements.is_empty() {
             let now = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
+                .expect("System time should be after Unix epoch")
                 .as_secs();
 
             measurements.push((now, new_measurements));

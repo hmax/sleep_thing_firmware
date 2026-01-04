@@ -9,7 +9,10 @@ use super::trait_def::{Measurement, Sensor};
 impl<'a> Sensor<'a> for Bme280<RcDevice<I2cDriver<'a>>, Delay> {
     fn measure(&mut self) -> Vec<Measurement> {
         let mut measurements: Vec<Measurement> = Vec::new();
-        self.take_forced_measurement().unwrap();
+        if let Err(e) = self.take_forced_measurement() {
+            error!("BME280: Failed to trigger measurement: {:?}", e);
+            return vec![];
+        }
         match self.read_sample() {
             Ok(sample) => {
                 match sample.temperature {
@@ -54,10 +57,11 @@ impl<'a> Sensor<'a> for Bme280<RcDevice<I2cDriver<'a>>, Delay> {
     }
 
     fn get_sensor(i2c_device: RcDevice<I2cDriver<'a>>) -> Self {
-        println!("Waking up a sensor");
+        println!("Initializing BME280 sensor");
         let delay = Delay::new_default();
         let mut sensor: Bme280<RcDevice<I2cDriver<'a>>, Delay> = Bme280::new(i2c_device, delay);
-        sensor.init().unwrap();
+        sensor.init()
+            .expect("Failed to initialize BME280 sensor - check I2C connection");
         sensor
             .set_sampling_configuration(
                 Bme280Configuration::default()
@@ -66,7 +70,7 @@ impl<'a> Sensor<'a> for Bme280<RcDevice<I2cDriver<'a>>, Delay> {
                     .with_temperature_oversampling(bme280_rs::Oversampling::Oversample4)
                     .with_pressure_oversampling(bme280_rs::Oversampling::Oversample4)
             )
-            .unwrap();
+            .expect("Failed to configure BME280 sensor");
 
         delay.delay_ms(100);
 

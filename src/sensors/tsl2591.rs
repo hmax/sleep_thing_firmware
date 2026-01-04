@@ -1,7 +1,7 @@
 use std::time::Duration;
 use embedded_hal_bus::i2c::RcDevice;
 use esp_idf_svc::hal::i2c::I2cDriver;
-use log::info;
+use log::{error, info, warn};
 use tsl2591_eh_driver;
 
 use super::trait_def::{Measurement, Sensor};
@@ -10,26 +10,59 @@ impl<'a> Sensor<'a> for tsl2591_eh_driver::Driver<RcDevice<I2cDriver<'a>>> {
     fn measure(&mut self) -> Vec<Measurement> {
         let mut current_gain = tsl2591_eh_driver::Gain::MED;
         let current_scan = tsl2591_eh_driver::IntegrationTimes::_100MS;
+        let max_iterations = 10; // Prevent infinite loop
+        let mut iteration = 0;
 
         loop {
-            self.set_gain(current_gain).unwrap();
-            self.set_timing(current_scan).unwrap();
+            if iteration >= max_iterations {
+                error!("TSL2591: Max iterations reached in gain adjustment loop");
+                return vec![];
+            }
+            iteration += 1;
 
-            self.enable().unwrap();
+            if let Err(e) = self.set_gain(current_gain) {
+                error!("TSL2591: Failed to set gain: {:?}", e);
+                return vec![];
+            }
+            if let Err(e) = self.set_timing(current_scan) {
+                error!("TSL2591: Failed to set timing: {:?}", e);
+                return vec![];
+            }
+
+            if let Err(e) = self.enable() {
+                error!("TSL2591: Failed to enable sensor: {:?}", e);
+                return vec![];
+            }
+
             let mut loop_count = 0;
             while loop_count < 10 {
-                let lux_sensor_status = self.get_status().unwrap();
+                let lux_sensor_status = match self.get_status() {
+                    Ok(status) => status,
+                    Err(e) => {
+                        error!("TSL2591: Failed to get status: {:?}", e);
+                        return vec![];
+                    }
+                };
                 if lux_sensor_status.avalid() {
                     println!("Lux sensor status: {:?}", lux_sensor_status);
                     break;
                 } else {
-                    loop_count = loop_count + 1;
+                    loop_count += 1;
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
 
-            let (ch0, ch1) = self.get_channel_data().unwrap();
-            self.disable().unwrap();
+            let (ch0, ch1) = match self.get_channel_data() {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("TSL2591: Failed to get channel data: {:?}", e);
+                    return vec![];
+                }
+            };
+
+            if let Err(e) = self.disable() {
+                warn!("TSL2591: Failed to disable sensor: {:?}", e);
+            }
 
             match self.calculate_lux(ch0, ch1) {
                 Ok(lux) => {
@@ -72,12 +105,18 @@ impl<'a> Sensor<'a> for tsl2591_eh_driver::Driver<RcDevice<I2cDriver<'a>>> {
     }
 
     fn get_sensor(i2c_device: RcDevice<I2cDriver<'a>>) -> Self {
-        let mut lux_sensor = tsl2591_eh_driver::Driver::new(i2c_device).unwrap();
-        lux_sensor.enable().unwrap();
+        println!("Initializing TSL2591 light sensor");
+        let mut lux_sensor = tsl2591_eh_driver::Driver::new(i2c_device)
+            .expect("Failed to create TSL2591 sensor - check I2C connection");
+        lux_sensor.enable()
+            .expect("Failed to enable TSL2591 sensor");
         std::thread::sleep(Duration::from_millis(1000));
 
-        println!("Lux sensor status: {:?}", lux_sensor.get_status().unwrap());
-        lux_sensor.disable().unwrap();
+        let status = lux_sensor.get_status()
+            .expect("Failed to read TSL2591 status");
+        println!("TSL2591 status: {:?}", status);
+        lux_sensor.disable()
+            .expect("Failed to disable TSL2591 sensor");
         lux_sensor
     }
 }

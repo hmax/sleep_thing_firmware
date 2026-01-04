@@ -49,15 +49,17 @@ impl<'a> Sensor<'a> for Scd4x<RcDevice<I2cDriver<'a>>, Delay> {
     }
 
     fn get_sensor(i2c_device: RcDevice<I2cDriver<'a>>) -> Self {
-        println!("Setting up a sensor");
+        println!("Setting up SCD4x sensor");
         let mut sensor = Scd4x::new(i2c_device, Delay::new_default());
-        println!("Stopping periodic measurement in a sensor");
+        println!("Stopping periodic measurement in SCD4x sensor");
         _ = sensor.stop_periodic_measurement();
-        println!("Re-initializing a sensor");
-        sensor.reinit().unwrap();
+        println!("Re-initializing SCD4x sensor");
+        sensor.reinit()
+            .expect("Failed to reinitialize SCD4x sensor - check I2C connection");
 
-        let serial = sensor.serial_number().unwrap();
-        println!("serial: {:#04x}", serial);
+        let serial = sensor.serial_number()
+            .expect("Failed to read SCD4x serial number");
+        println!("SCD4x serial: {:#04x}", serial);
         sensor
     }
 }
