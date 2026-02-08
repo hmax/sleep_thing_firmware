@@ -28,7 +28,7 @@ use std::time::{Duration, SystemTime};
 use tsl2591_eh_driver;
 
 #[cfg(feature = "bme280")]
-use bme280_rs::{Bme280, Configuration as Bme280Configuration};
+use bme280_rs::Bme280;
 #[cfg(feature = "scd4x")]
 use scd4x::Scd4x;
 use esp_idf_svc::hal::i2c::{I2cConfig, I2cDriver};
@@ -42,7 +42,7 @@ const PORT: &str = "2003";
 
 const SEND_TIMEOUT_SEC: i32 = 300;
 
-const DATA_PREFIX: &str = "sensors.hbase.bedroom.";
+const DATA_PREFIX: &str = env!("DATA_PREFIX");
 
 
 fn preamble() -> anyhow::Result<()> {
