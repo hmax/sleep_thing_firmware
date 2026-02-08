@@ -15,7 +15,7 @@ debug = true    # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [features]
-default = ["std", "embassy", "esp-idf-svc/native"]
+default = ["std", "esp-idf-svc/native"]
 
 pio = ["esp-idf-svc/pio"]
 std = ["alloc", "esp-idf-svc/binstart", "esp-idf-svc/std"]
@@ -31,8 +31,7 @@ tsl2591 = ["dep:tsl2591-eh-driver"]
 log = { version = "0.4.27", default-features = false }
 esp-idf-svc = { version = "0.51.0", default-features = false }
 scd4x = { version = "0.4.0", default-features = false, optional = true }
-anyhow = "1.0.79"
-embedded-hal = {version = "1.0.0"}
+anyhow = "1.0.100"
 embedded-hal-bus = { version = "0.3.0", features = ["alloc"] }
 tsl2591-eh-driver = { version = "0.5.1", optional = true }
 rand = "0.9.0"
